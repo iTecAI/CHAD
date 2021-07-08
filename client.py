@@ -4,6 +4,10 @@ import rsa
 import json
 from cryptography.fernet import Fernet
 import base64
+import subprocess
+import random
+import sys
+import time
 
 class CHADException(Exception):
     pass
@@ -128,3 +132,32 @@ class Connection:
             return
         else:
             raise CHADException(f'Failed to delete key {key} in document {document_path}: {resp["result"]}')
+
+class SelfContainedConnection(Connection):
+    def __init__(
+        self, 
+        root='chad_db', 
+        port=random.randint(8000, 32000), 
+        protocol='http', 
+        server_python='server.py', 
+        alias_length=12, 
+        log_access=False, 
+        log_destination=sys.stdout
+    ):
+        self.serverProcess = subprocess.Popen([sys.executable, server_python, '--config', json.dumps({
+            'host': 'localhost',
+            'port': port,
+            'databaseRoot': root,
+            'aliasLength': alias_length,
+            'logRequests': log_access
+        })], stdout=log_destination)
+        time.sleep(1)
+        super().__init__('localhost', port, protocol=protocol)
+    
+    def close(self):
+        self.serverProcess.kill()
+
+db = SelfContainedConnection()
+db.create_document({'test': {'test2': 'electric boogaloo'}})
+time.sleep(2)
+db.close()

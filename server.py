@@ -24,13 +24,19 @@ if __name__ == '__main__': # Get args on program initial load
     parser.add_argument('--config', default='config.json', help='Path to the CHAD configuration JSON file. Defaults to config.json.')
 
     args = parser.parse_args()
-    with open(args.config, 'r') as f:
-        CONFIG = json.load(f)
+    if args.config.endswith('.json'):
+        with open(args.config, 'r') as f:
+            CONFIG = json.load(f)
+    else:
+        CONFIG = json.loads(args.config)
     os.environ['CHAD-CONFIGURATION'] = args.config # Pass config path to ENV for uvicorn run
 else: # Run when running through uvicorn
     try:
-        with open(os.environ['CHAD-CONFIGURATION'], 'r') as f:
-            CONFIG = json.load(f) # Load configuration
+        if os.environ['CHAD-CONFIGURATION'].endswith('.json'):
+            with open(os.environ['CHAD-CONFIGURATION'], 'r') as f:
+                CONFIG = json.load(f) # Load configuration
+        else:
+            CONFIG = json.loads(os.environ['CHAD-CONFIGURATION'])
     except FileNotFoundError:
         raise ValueError('Bad value for the CHAD configuration path passed to ENVVARS')
     except KeyError:
@@ -111,7 +117,6 @@ async def process_request(request: Request, call_next): # decrypt POST requests
         return final
     else: # Do not process GET requests
         resp: Response = await call_next(request)
-        print(request.headers.keys())
         if 'x-public-key' in request.headers.keys(): # Encrypt return data if the request headers include a public key
             client_public_key = rsa.PublicKey.load_pkcs1(base64.urlsafe_b64decode(request.headers['X-Public-Key'].encode('utf-8')))
             body = b""

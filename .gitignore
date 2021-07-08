@@ -131,3 +131,4 @@ dmypy.json
 *.json
 *.pem
 database_root
+chad_db
