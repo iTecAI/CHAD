@@ -10,6 +10,9 @@ import base64
 from cryptography.fernet import Fernet
 import rsa
 import time
+import random
+import hashlib
+import re
 
 from util import *
 
@@ -42,6 +45,31 @@ else: # Run when running through uvicorn
             prk.write(PRIVATE_KEY.save_pkcs1())
         with open(default(CONFIG, 'publicKey', 'pubKey.pem'), 'wb') as pbk:
             pbk.write(PUBLIC_KEY.save_pkcs1())
+    
+    if os.path.exists(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'))): # Check that database root exists. If not, create it.
+        if not os.path.exists(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), '.links')):
+            with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), '.links'), 'w') as f:
+                f.write(json.dumps({
+                    "aliases": {},
+                    "links": {}
+                }))
+    else:
+        try:
+            os.makedirs(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/')), exist_ok=True)
+            with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), '.links'), 'w') as f:
+                f.write(json.dumps({
+                    "aliases": {},
+                    "links": {}
+                }))
+        except:
+            raise ValueError(f"Bad value for databaseRoot: {str(default(CONFIG, 'databaseRoot', 'root'))}")
+    
+    with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), '.links'), 'r') as f:
+        LINK_CACHE = json.load(f)
+
+def _save_cache(cache):
+    with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), '.links'), 'w') as f:
+        json.dump(cache, f)
 
 @app.middleware('http')
 async def process_request(request: Request, call_next): # decrypt POST requests
@@ -105,6 +133,119 @@ async def post_root(request: Request):
 async def get_root(request: Request):
     return JSONResponse({'timestamp': time.ctime(), 'parameters': request.query_params._dict})
 
+@app.post('/doc/new') # content[r], mediaType[r], longId[o], shortId[o], documentPath[o]
+async def post_doc_new(request: Request, response: Response): # Create a new document/object
+    global LINK_CACHE
+    data: dict = request.state.data
+
+    # Generate IDs
+    if 'longId' in data.keys():
+        longId = str(data['longId'])
+    else:
+        longId = base64.urlsafe_b64encode(
+            hashlib.sha256(
+                str(time.time()+random.random()).encode('utf-8')
+            ).hexdigest().encode('utf-8')
+        ).decode('utf-8').strip('=')
+    if 'shortId' in data.keys():
+        shortId = base64.urlsafe_b64encode(str(data['shortId']).encode('utf-8')).decode('utf-8')
+    else:
+        shortId = base64.urlsafe_b64encode(''.join([random.choice(longId) for _ in range(default(CONFIG, 'aliasLength', 12))]).encode('utf-8')).decode('utf-8')
+    
+    # Check required & default body contents
+    if not 'content' in data.keys():
+        response.status_code = HTTP_400_BAD_REQUEST
+        return {'result': 'Must include "content" key in request data.'}
+    if not 'mediaType' in data.keys():
+        response.status_code = HTTP_400_BAD_REQUEST
+        return {'result': 'Must include "mediaType" key in request data.'}
+    if not 'documentPath' in data.keys():
+        data['documentPath'] = ''
+    
+    # Check for valid MIME type
+    if len(data['mediaType']) > 0 and re.fullmatch('.{1,}/.{1,}', data['mediaType']) and data['mediaType'].split('/')[0].lower() in MIME_REGISTRIES:
+        registry = data['mediaType'].split('/')[0].lower()
+        datatype = data['mediaType'].split('/')[1].lower()
+
+        # Determine file extension
+        if 'extension' in data.keys():
+            extension = data['extension']
+        elif datatype == 'plain':
+            extension = 'txt'
+        else:
+            extension = datatype+''
+        
+        # Build paths
+        real_path = longId + '.' + extension
+        if len(data['documentPath']) == 0:
+            canonical_fullpath = longId + ''
+            canonical_shortpath = shortId + ''
+        else:
+            canonical_fullpath = data['documentPath'] + '.' + longId
+            canonical_shortpath = data['documentPath'] + '.' + shortId
+        
+        # Add the link to the cache
+        LINK_CACHE['links'][longId] = {
+            'mediaType': {
+                'registry': registry,
+                'datatype': datatype,
+                'mime': data['mediaType'].lower(),
+                'extension': extension
+            },
+            'aliases': [canonical_shortpath, canonical_fullpath],
+            'path': data['documentPath'],
+            'filePath': real_path
+        }
+
+        # Set aliases
+        LINK_CACHE['aliases'][canonical_shortpath] = longId + ''
+        LINK_CACHE['aliases'][canonical_fullpath] = longId + ''
+        _save_cache(LINK_CACHE)
+
+        # Save document
+        if datatype == 'json':
+            if not type(data['content']) in [dict, str]:
+                response.status_code = HTTP_400_BAD_REQUEST
+                return {'result': f'JSON content should be in string or mapping form. Content recieved was in form "{str(type(data["content"]))}" instead.'}
+            with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), real_path), 'w') as f:
+                if type(data['content']) == dict:
+                    json.dump(data['content'], f)
+                elif type(data['content']) == str:
+                    f.write(data['content'])
+        else:
+            if re.fullmatch('data:.{1,}/.{1,};base64,.{0,}',data['content']):
+                content = base64.urlsafe_b64decode(data['content'].split(',')[1].encode('utf-8'))
+            else:
+                content = data['content'].encode('utf-8')
+            with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), real_path), 'wb') as f:
+                f.write(content)
+        
+        return {'result': 'success', 'longId': longId, 'shortId': shortId, 'aliases': LINK_CACHE['links'][longId]['aliases']}
+            
+    else:
+        response.status_code = HTTP_400_BAD_REQUEST
+        return {'result': f'mediaType key "{data["mediaType"]}" is not a valid MIME type.'}
+    
+@app.get('/doc/{path}') # path[r]
+async def get_doc_at_path(path: str, request: Request, response: Response):
+    global LINK_CACHE
+    if path in LINK_CACHE['aliases'].keys():
+        _link = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]
+        file_path = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]['filePath']
+    elif path in LINK_CACHE['links'].keys():
+        _link = LINK_CACHE['links'][path]
+        file_path = LINK_CACHE['links'][path]['filePath']
+    else:
+        response.status_code = HTTP_404_NOT_FOUND
+        return {'result': f'Document at path {path} not found in aliases or link names.'}
+    if _link['mediaType']['datatype'] == 'json':
+        with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path), 'r') as f:
+            content = json.load(f)
+    else:
+        with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path), 'rb') as f:
+            content = f'data:{_link["mediaType"]["mime"]};base64,{base64.urlsafe_b64encode(f.read()).decode("utf-8")}'
+    return {'result': 'success', 'content': content, 'type': _link["mediaType"]["mime"].split('/')}
+    
 
 if __name__ == '__main__':
     uvicorn.run('server:app', host=default(CONFIG, 'host', 'localhost'), port=default(CONFIG, 'port', 88), access_log=default(CONFIG, 'logRequests', False))

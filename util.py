@@ -5,3 +5,16 @@ def default(dct, key, default=None):
         return dct[key]
     except KeyError:
         return copy.deepcopy(default)
+
+MIME_REGISTRIES = [
+    'application',
+    'audio',
+    'font',
+    'example',
+    'image',
+    'message',
+    'model',
+    'multipart',
+    'text',
+    'video'
+]
