@@ -13,6 +13,7 @@ import time
 import random
 import hashlib
 import re
+import traceback
 
 from util import *
 
@@ -66,6 +67,12 @@ else: # Run when running through uvicorn
     
     with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), '.links'), 'r') as f:
         LINK_CACHE = json.load(f)
+    
+    LOCK = []
+
+def check_lock(lid):
+    while lid in LOCK:
+        pass
 
 def _save_cache(cache):
     with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), '.links'), 'w') as f:
@@ -184,41 +191,55 @@ async def post_doc_new(request: Request, response: Response): # Create a new doc
             canonical_fullpath = data['documentPath'] + '.' + longId
             canonical_shortpath = data['documentPath'] + '.' + shortId
         
-        # Add the link to the cache
-        LINK_CACHE['links'][longId] = {
-            'mediaType': {
-                'registry': registry,
-                'datatype': datatype,
-                'mime': data['mediaType'].lower(),
-                'extension': extension
-            },
-            'aliases': [canonical_shortpath, canonical_fullpath],
-            'path': data['documentPath'],
-            'filePath': real_path
-        }
+        check_lock(longId)
+        LOCK.append(longId)
+        
+        try:
+            # Add the link to the cache
+            LINK_CACHE['links'][longId] = {
+                'mediaType': {
+                    'registry': registry,
+                    'datatype': datatype,
+                    'mime': data['mediaType'].lower(),
+                    'extension': extension
+                },
+                'aliases': [canonical_shortpath, canonical_fullpath],
+                'path': data['documentPath'],
+                'filePath': real_path,
+                'ids': {
+                    'long': longId,
+                    'short': shortId
+                }
+            }
 
-        # Set aliases
-        LINK_CACHE['aliases'][canonical_shortpath] = longId + ''
-        LINK_CACHE['aliases'][canonical_fullpath] = longId + ''
-        _save_cache(LINK_CACHE)
+            # Set aliases
+            LINK_CACHE['aliases'][canonical_shortpath] = longId + ''
+            LINK_CACHE['aliases'][canonical_fullpath] = longId + ''
+            _save_cache(LINK_CACHE)
 
-        # Save document
-        if datatype == 'json':
-            if not type(data['content']) in [dict, str]:
-                response.status_code = HTTP_400_BAD_REQUEST
-                return {'result': f'JSON content should be in string or mapping form. Content recieved was in form "{str(type(data["content"]))}" instead.'}
-            with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), real_path), 'w') as f:
-                if type(data['content']) == dict:
-                    json.dump(data['content'], f)
-                elif type(data['content']) == str:
-                    f.write(data['content'])
-        else:
-            if re.fullmatch('data:.{1,}/.{1,};base64,.{0,}',data['content']):
-                content = base64.urlsafe_b64decode(data['content'].split(',')[1].encode('utf-8'))
+            # Save document
+            if datatype == 'json':
+                if not type(data['content']) in [dict, str]:
+                    response.status_code = HTTP_400_BAD_REQUEST
+                    return {'result': f'JSON content should be in string or mapping form. Content recieved was in form "{str(type(data["content"]))}" instead.'}
+                with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), real_path), 'w') as f:
+                    if type(data['content']) == dict:
+                        json.dump(data['content'], f)
+                    elif type(data['content']) == str:
+                        f.write(data['content'])
             else:
-                content = data['content'].encode('utf-8')
-            with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), real_path), 'wb') as f:
-                f.write(content)
+                if re.fullmatch('data:.{1,}/.{1,};base64,.{0,}',data['content']):
+                    content = base64.urlsafe_b64decode(data['content'].split(',')[1].encode('utf-8'))
+                else:
+                    content = data['content'].encode('utf-8')
+                with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), real_path), 'wb') as f:
+                    f.write(content)
+        except:
+            LOCK.remove(longId)
+            response.status_code = HTTP_500_INTERNAL_SERVER_ERROR
+            return {'result': f'Unexpected error occurred: {traceback.format_exc()}'}
+            
+        LOCK.remove(longId)
         
         return {'result': 'success', 'longId': longId, 'shortId': shortId, 'aliases': LINK_CACHE['links'][longId]['aliases']}
             
@@ -227,7 +248,7 @@ async def post_doc_new(request: Request, response: Response): # Create a new doc
         return {'result': f'mediaType key "{data["mediaType"]}" is not a valid MIME type.'}
     
 @app.get('/doc/{path}') # path[r]
-async def get_doc_at_path(path: str, request: Request, response: Response):
+async def get_doc_at_path(path: str, request: Request, response: Response): # Get full document content at path
     global LINK_CACHE
     if path in LINK_CACHE['aliases'].keys():
         _link = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]
@@ -245,7 +266,125 @@ async def get_doc_at_path(path: str, request: Request, response: Response):
         with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path), 'rb') as f:
             content = f'data:{_link["mediaType"]["mime"]};base64,{base64.urlsafe_b64encode(f.read()).decode("utf-8")}'
     return {'result': 'success', 'content': content, 'type': _link["mediaType"]["mime"].split('/')}
+
+@app.post('/doc/{path}/key/{key}') # path[r], key[r], data[r]
+async def post_key_to_doc(path: str, key: str, request: Request, response: Response): # Edit key (path.to.key) in doc at path
+    global LINK_CACHE
+    data: dict = request.state.data
+
+    if not 'data' in data.keys(): # Verify args
+        response.status_code = HTTP_400_BAD_REQUEST
+        return {'result': 'Must include "data" key in request data.'}
+
+    # Get file path
+    if path in LINK_CACHE['aliases'].keys():
+        _link = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]
+        file_path = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]['filePath']
+    elif path in LINK_CACHE['links'].keys():
+        _link = LINK_CACHE['links'][path]
+        file_path = LINK_CACHE['links'][path]['filePath']
+    else:
+        response.status_code = HTTP_404_NOT_FOUND
+        return {'result': f'Document at path {path} not found in aliases or link names.'}
     
+    check_lock(_link['ids']['long'])
+    LOCK.append(_link['ids']['long'])
+    
+    try:
+        # Verify that the document is a JSON document
+        if _link['mediaType']['datatype'] == 'json':
+            with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path), 'r') as f:
+                content = json.load(f)
+        else:
+            response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+            return {'result': 'Cannot modify keys of a non-JSON document.'}
+        
+        # Check each key
+        parts = key.split('.')
+        execp = 'content'
+        for p in parts:
+            if type(eval(execp, globals(), locals())) == list:
+                try:
+                    int(p)
+                except:
+                    response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+                    return {'result': f'Cannot get key {p} in {execp} as {execp} is a list.'}
+                if len(eval(execp, globals(), locals())) > int(p) and int(p) >= 0:
+                    execp += f'[{p}]'
+                else:
+                    response.status_code = HTTP_404_NOT_FOUND
+                    return {'result': f'Index {p} in {execp} does not exist.'}
+            elif type(eval(execp, globals(), locals())) == dict:
+                if p in eval(execp, globals(), locals()).keys():
+                    execp += f'["{p}"]'
+                else:
+                    response.status_code = HTTP_404_NOT_FOUND
+                    return {'result': f'Key {p} in {execp} does not exist.'}
+            else:
+                response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+                return {'result': f'Cannot edit a key in an entry that is not a dict or a list.'}
+        
+        # Edit document
+        exec(f'{execp} = data["data"]', globals(), locals())
+        with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path), 'w') as f:
+            json.dump(content, f)
+    except:
+        LOCK.remove(_link['ids']['long'])
+        response.status_code = HTTP_500_INTERNAL_SERVER_ERROR
+        return {'result': f'Unexpected error occurred: {traceback.format_exc()}'}
+    LOCK.remove(_link['ids']['long'])
+    return {'result': 'success'}
+
+@app.get('/doc/{path}/key/{key}') # path[r], key[r]
+async def get_key_in_doc(path: str, key: str, request: Request, response: Response): # Get key (path.to.key) in doc at path
+    global LINK_CACHE
+
+    # Get file path
+    if path in LINK_CACHE['aliases'].keys():
+        _link = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]
+        file_path = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]['filePath']
+    elif path in LINK_CACHE['links'].keys():
+        _link = LINK_CACHE['links'][path]
+        file_path = LINK_CACHE['links'][path]['filePath']
+    else:
+        response.status_code = HTTP_404_NOT_FOUND
+        return {'result': f'Document at path {path} not found in aliases or link names.'}
+    
+    # Verify that the document is a JSON document
+    if _link['mediaType']['datatype'] == 'json':
+        with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path), 'r') as f:
+            content = json.load(f)
+    else:
+        response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+        return {'result': 'Cannot modify keys of a non-JSON document.'}
+    
+    # Check each key
+    parts = key.split('.')
+    execp = 'content'
+    for p in parts:
+        if type(eval(execp, globals(), locals())) == list:
+            try:
+                int(p)
+            except:
+                response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+                return {'result': f'Cannot get key {p} in {execp} as {execp} is a list.'}
+            if len(eval(execp, globals(), locals())) > int(p) and int(p) >= 0:
+                execp += f'[{p}]'
+            else:
+                response.status_code = HTTP_404_NOT_FOUND
+                return {'result': f'Index {p} in {execp} does not exist.'}
+        elif type(eval(execp, globals(), locals())) == dict:
+            if p in eval(execp, globals(), locals()).keys():
+                execp += f'["{p}"]'
+            else:
+                response.status_code = HTTP_404_NOT_FOUND
+                return {'result': f'Key {p} in {execp} does not exist.'}
+        else:
+            response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+            return {'result': f'Cannot get a key in an entry that is not a dict or a list.'}
+    
+    # Get data at key
+    return {'result': 'success', 'data': eval(f'{execp}')}
 
 if __name__ == '__main__':
     uvicorn.run('server:app', host=default(CONFIG, 'host', 'localhost'), port=default(CONFIG, 'port', 88), access_log=default(CONFIG, 'logRequests', False))

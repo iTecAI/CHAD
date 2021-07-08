@@ -69,7 +69,8 @@ class Connection:
             except JSONDecodeError:
                 return decrypted_data
     
-    def create_document(self, content, path='', mimetype='application/json', longId=None, shortId=None):
+    def create_document(self, content, path='', mimetype='application/json', longId=None, shortId=None): # Create a new document
+        # Assemble request from args
         data = {
             'content': content,
             'mediaType': mimetype,
@@ -79,6 +80,8 @@ class Connection:
             data['longId'] = longId
         if shortId:
             data['shortId'] = shortId
+        
+        # Process request & response
         response_data = self._request('POST', '/doc/new', data=data)
         if response_data['result'] == 'success':
             return {
@@ -91,7 +94,7 @@ class Connection:
         else:
             raise CHADException(f'Failed to create a new document: {response_data["result"]}')
     
-    def get_document(self, path):
+    def get_document(self, path): # Get whole document at path
         response_data = self._request('GET', f'/doc/{path}')
         if not response_data['result'] == 'success':
             raise CHADException(f'Failed to get document at path {path}: {response_data["result"]}')
@@ -99,15 +102,28 @@ class Connection:
             return response_data['content']
         else:
             return base64.urlsafe_b64decode(response_data['content'].split('base64,')[1].encode('utf-8'))
+    
+    def edit_document_key(self, document_path, key, data): # Edit portion of document at key
+        resp = self._request('POST', f'/doc/{str(document_path)}/key/{str(key)}', data={'data': data})
+        if resp['result'] == 'success':
+            return 
+        else:
+            raise CHADException(f'Failed to edit key {key} in document {document_path}: {resp["result"]}')
+    
+    def get_document_key(self, document_path, key): # Get portion of document at key
+        resp = self._request('GET', f'/doc/{str(document_path)}/key/{str(key)}')
+        if resp['result'] == 'success':
+            return resp['data']
+        else:
+            raise CHADException(f'Failed to edit key {key} in document {document_path}: {resp["result"]}')
+
 
 """conn = Connection('localhost', 1500)
 print(conn._request('POST', '/', {'test':'test'}))
 print(conn._request('GET', '/', {'test':'test'}))
 jdoc = conn.create_document({'test': 'test'})
 print(jdoc)
-with open('LICENSE', 'rb') as f:
-    encoded = f'data:text/plain;base64,{base64.urlsafe_b64encode(f.read()).decode("utf-8")}'
-    ldoc = conn.create_document(encoded, mimetype='text/plain', path='license')
-    print(ldoc)
 print(conn.get_document(jdoc['aliases'][0]))
-print(conn.get_document(ldoc['aliases'][0]))"""
+conn.edit_document_key(jdoc['aliases'][0], 'test', {'potato': 'tomato'})
+print(conn.get_document(jdoc['aliases'][0]))
+print(conn.get_document_key(jdoc['aliases'][0], 'test'))"""
