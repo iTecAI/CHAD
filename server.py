@@ -138,7 +138,7 @@ async def post_root(request: Request):
 
 @app.get('/', response_class=JSONResponse) # Get @ root, used for testing and getting the server's public key.
 async def get_root(request: Request):
-    return JSONResponse({'timestamp': time.ctime(), 'parameters': request.query_params._dict})
+    return JSONResponse({'timestamp': time.ctime(), 'parameters': request.query_params._dict, 'link_cache': LINK_CACHE})
 
 @app.post('/doc/new') # content[r], mediaType[r], longId[o], shortId[o], documentPath[o]
 async def post_doc_new(request: Request, response: Response): # Create a new document/object
