@@ -142,7 +142,7 @@ async def get_root(request: Request):
 
 @app.post('/doc/new') # content[r], mediaType[r], longId[o], shortId[o], documentPath[o]
 async def post_doc_new(request: Request, response: Response): # Create a new document/object
-    global LINK_CACHE
+    global LINK_CACHE, LOCK
     data: dict = request.state.data
 
     # Generate IDs
@@ -249,7 +249,7 @@ async def post_doc_new(request: Request, response: Response): # Create a new doc
     
 @app.get('/doc/{path}') # path[r]
 async def get_doc_at_path(path: str, request: Request, response: Response): # Get full document content at path
-    global LINK_CACHE
+    global LINK_CACHE, LOCK
     if path in LINK_CACHE['aliases'].keys():
         _link = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]
         file_path = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]['filePath']
@@ -269,7 +269,7 @@ async def get_doc_at_path(path: str, request: Request, response: Response): # Ge
 
 @app.post('/doc/{path}/key/{key}') # path[r], key[r], data[r]
 async def post_key_to_doc(path: str, key: str, request: Request, response: Response): # Edit key (path.to.key) in doc at path
-    global LINK_CACHE
+    global LINK_CACHE, LOCK
     data: dict = request.state.data
 
     if not 'data' in data.keys(): # Verify args
@@ -337,7 +337,7 @@ async def post_key_to_doc(path: str, key: str, request: Request, response: Respo
 
 @app.get('/doc/{path}/key/{key}') # path[r], key[r]
 async def get_key_in_doc(path: str, key: str, request: Request, response: Response): # Get key (path.to.key) in doc at path
-    global LINK_CACHE
+    global LINK_CACHE, LOCK
 
     # Get file path
     if path in LINK_CACHE['aliases'].keys():
@@ -385,6 +385,99 @@ async def get_key_in_doc(path: str, key: str, request: Request, response: Respon
     
     # Get data at key
     return {'result': 'success', 'data': eval(f'{execp}')}
+
+@app.post('/doc/{path}/delete') # path[r]
+async def delete_doc(path: str, request: Request, response: Response):
+    global LINK_CACHE, LOCK
+    if path in LINK_CACHE['aliases'].keys():
+        _link = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]
+        file_path = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]['filePath']
+    elif path in LINK_CACHE['links'].keys():
+        _link = LINK_CACHE['links'][path]
+        file_path = LINK_CACHE['links'][path]['filePath']
+    else:
+        response.status_code = HTTP_404_NOT_FOUND
+        return {'result': f'Document at path {path} not found in aliases or link names.'}
+    LID = _link['ids']['long']
+    check_lock(LID)
+    LOCK.append(LID)
+    try:
+        os.remove(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path))
+        for a in _link['aliases']:
+            try:
+                del LINK_CACHE['aliases'][a]
+            except:
+                pass
+        del LINK_CACHE['links'][LID]
+    except:
+        LOCK.remove(LID)
+        response.status_code = HTTP_500_INTERNAL_SERVER_ERROR
+        return {'result': f'Unexpected error occurred: {traceback.format_exc()}'}
+    LOCK.remove(LID)
+    return {'result': 'success'}
+
+@app.post('/doc/{path}/key/{key}/delete') # path[r], key[r]
+async def post_delete_key_in_doc(path: str, key: str, request: Request, response: Response): # Delete key (path.to.key) in doc at path
+    global LINK_CACHE, LOCK
+
+    # Get file path
+    if path in LINK_CACHE['aliases'].keys():
+        _link = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]
+        file_path = LINK_CACHE['links'][LINK_CACHE['aliases'][path]]['filePath']
+    elif path in LINK_CACHE['links'].keys():
+        _link = LINK_CACHE['links'][path]
+        file_path = LINK_CACHE['links'][path]['filePath']
+    else:
+        response.status_code = HTTP_404_NOT_FOUND
+        return {'result': f'Document at path {path} not found in aliases or link names.'}
+    
+    check_lock(_link['ids']['long'])
+    LOCK.append(_link['ids']['long'])
+    
+    try:
+        # Verify that the document is a JSON document
+        if _link['mediaType']['datatype'] == 'json':
+            with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path), 'r') as f:
+                content = json.load(f)
+        else:
+            response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+            return {'result': 'Cannot modify keys of a non-JSON document.'}
+        
+        # Check each key
+        parts = key.split('.')
+        execp = 'content'
+        for p in parts:
+            if type(eval(execp, globals(), locals())) == list:
+                try:
+                    int(p)
+                except:
+                    response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+                    return {'result': f'Cannot get key {p} in {execp} as {execp} is a list.'}
+                if len(eval(execp, globals(), locals())) > int(p) and int(p) >= 0:
+                    execp += f'[{p}]'
+                else:
+                    response.status_code = HTTP_404_NOT_FOUND
+                    return {'result': f'Index {p} in {execp} does not exist.'}
+            elif type(eval(execp, globals(), locals())) == dict:
+                if p in eval(execp, globals(), locals()).keys():
+                    execp += f'["{p}"]'
+                else:
+                    response.status_code = HTTP_404_NOT_FOUND
+                    return {'result': f'Key {p} in {execp} does not exist.'}
+            else:
+                response.status_code = HTTP_405_METHOD_NOT_ALLOWED
+                return {'result': f'Cannot delete a key in an entry that is not a dict or a list.'}
+        
+        # delete
+        exec(f'del {execp}', globals(), locals())
+        with open(os.path.join(*default(CONFIG, 'databaseRoot', 'root').split('/'), file_path), 'w') as f:
+            json.dump(content, f)
+    except:
+        LOCK.remove(_link['ids']['long'])
+        response.status_code = HTTP_500_INTERNAL_SERVER_ERROR
+        return {'result': f'Unexpected error occurred: {traceback.format_exc()}'}
+    LOCK.remove(_link['ids']['long'])
+    return {'result': 'success'}
 
 if __name__ == '__main__':
     uvicorn.run('server:app', host=default(CONFIG, 'host', 'localhost'), port=default(CONFIG, 'port', 88), access_log=default(CONFIG, 'logRequests', False))

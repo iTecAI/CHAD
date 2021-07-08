@@ -116,14 +116,15 @@ class Connection:
             return resp['data']
         else:
             raise CHADException(f'Failed to edit key {key} in document {document_path}: {resp["result"]}')
-
-
-"""conn = Connection('localhost', 1500)
-print(conn._request('POST', '/', {'test':'test'}))
-print(conn._request('GET', '/', {'test':'test'}))
-jdoc = conn.create_document({'test': 'test'})
-print(jdoc)
-print(conn.get_document(jdoc['aliases'][0]))
-conn.edit_document_key(jdoc['aliases'][0], 'test', {'potato': 'tomato'})
-print(conn.get_document(jdoc['aliases'][0]))
-print(conn.get_document_key(jdoc['aliases'][0], 'test'))"""
+    
+    def delete_document(self, path): # Delete whole document at path
+        response_data = self._request('POST', f'/doc/{path}/delete')
+        if not response_data['result'] == 'success':
+            raise CHADException(f'Failed to delete document at path {path}: {response_data["result"]}')
+    
+    def delete_document_key(self, document_path, key): # Delete portion of document at key
+        resp = self._request('POST', f'/doc/{str(document_path)}/key/{str(key)}/delete')
+        if resp['result'] == 'success':
+            return
+        else:
+            raise CHADException(f'Failed to delete key {key} in document {document_path}: {resp["result"]}')
